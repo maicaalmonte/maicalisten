@@ -3,6 +3,7 @@ from spotipy.oauth2 import SpotifyOAuth
 from dotenv import load_dotenv
 import spotipy
 from datetime import datetime
+from pytz import timezone
 
 # Load environment variables
 load_dotenv()
@@ -17,14 +18,15 @@ sp_oauth = SpotifyOAuth(
     client_id=SPOTIPY_CLIENT_ID,
     client_secret=SPOTIPY_CLIENT_SECRET,
     redirect_uri=SPOTIPY_REDIRECT_URI,
-    scope="user-library-read user-read-recently-played"
+    scope="user-library-read user-read-recently-played user-top-read"
 )
 
-# Your existing token from the callback
-access_token = 'BQCrd5iYK5I3V2zabGrU4zp-HcSujEeCTjeOHrO9UPG8ZCxcLL2dBTfu4q810StLK3EJsXt0ncrODbpBy9QhKbogvv-Ix8TmneZdzPjlOerbITObLIbe4_UPiN9Y0aUDhNM34nrpqMAGA2gBwWXiHsmiLorv0Qb8ZPTFDbIsZ8q2qRiRxmf58DJdlIm4SjL_aqxwfMlUHprc9dr0SL_FFyRVvQsgmv7Tcy6ljPw14ilBTIZ0lCofT9xqYNgF'
+# Initialize a session to store the tokens
+tokens = {}
 
-sp = spotipy.Spotify(auth=access_token)
-
+def refresh_access_token(refresh_token):
+    token_info = sp_oauth.refresh_access_token(refresh_token)
+    return token_info['access_token'], token_info['refresh_token']
 
 @app.route('/')
 def home():
@@ -32,48 +34,50 @@ def home():
     auth_url = sp_oauth.get_authorize_url()
     return redirect(auth_url)
 
-
 @app.route('/callback')
 def callback():
     code = request.args.get('code')
     if code:
-        # Get access token
+        # Get access token and refresh token
         token_info = sp_oauth.get_access_token(code)
         access_token = token_info['access_token']
-        print(f"Access token: {access_token}")  # Log the token
+        refresh_token = token_info['refresh_token']  # Store this for refreshing the token later
 
-        # Now use the access token to fetch the recently played tracks
+        # Save the tokens in the session
+        tokens['access_token'] = access_token
+        tokens['refresh_token'] = refresh_token
+
+        return redirect('/top_tracks')  # Redirect to top tracks page after successful authorization
+
+    else:
+        return "Authorization failed."
+
+@app.route('/top_tracks')
+def top_tracks():
+    # Ensure the user is authenticated and has an access token
+    access_token = tokens.get('access_token')
+    if access_token:
         sp = spotipy.Spotify(auth=access_token)
 
-        # Fetch the last 10 tracks
-        recently_played = sp.current_user_recently_played(limit=10)
+        # Fetch the top 5 tracks for the user
+        top_tracks = sp.current_user_top_tracks(limit=5, time_range='long_term')
 
         # Collect the track information
         tracks_info = []
-        for item in recently_played['items']:
-            track = item['track']
-            played_at = item['played_at']
-            try:
-                # Convert the timestamp to a readable format, adjusting for milliseconds and Z (UTC)
-                formatted_time = datetime.strptime(played_at, "%Y-%m-%dT%H:%M:%S.%fZ").strftime("%B %d, %Y, %I:%M %p")
-            except ValueError:
-                # In case the format does not match, handle gracefully
-                formatted_time = "Unknown time format"
-
+        for track in top_tracks['items']:
             tracks_info.append({
                 'name': track['name'],
                 'artist': ', '.join(artist['name'] for artist in track['artists']),
                 'album': track['album']['name'],
                 'url': track['external_urls']['spotify'],
-                'image': track['album']['images'][0]['url'] if track['album']['images'] else '',
-                'played_at': formatted_time
+                'image': track['album']['images'][0]['url'] if track['album']['images'] else ''
             })
 
         # Render the HTML with minimal Spotify-like layout
         html_content = """
         <html>
         <head>
-            <title>Recently Played Tracks</title>
+            <title>Top Tracks</title>
             <style>
                 body {
                     font-family: 'Arial', sans-serif;
@@ -151,7 +155,7 @@ def callback():
         </head>
         <body>
             <div class="container">
-                <h1>Recently Played Tracks</h1>
+                <h1>Your Top Tracks</h1>
                 {% for track in tracks %}
                     <div class="track">
                         <img src="{{ track.image }}" alt="{{ track.name }}">
@@ -159,7 +163,6 @@ def callback():
                             <div class="track-name">{{ track.name }}</div>
                             <div class="track-artist">{{ track.artist }}</div>
                             <div class="track-album">{{ track.album }}</div>
-                            <div class="track-time">Played on: {{ track.played_at }}</div>
                             <a href="{{ track.url }}" target="_blank">Listen on Spotify</a>
                         </div>
                     </div>
@@ -168,12 +171,22 @@ def callback():
         </body>
         </html>
         """
-
         return render_template_string(html_content, tracks=tracks_info)
 
     else:
-        return "Authorization failed."
+        return "You need to log in first."
 
+# Example route to handle token refresh
+@app.route('/refresh')
+def refresh():
+    refresh_token = tokens.get('refresh_token')
+    if refresh_token:
+        access_token, refresh_token = refresh_access_token(refresh_token)
+        tokens['access_token'] = access_token
+        tokens['refresh_token'] = refresh_token
+        return "Access token refreshed!"
+    else:
+        return "No refresh token available."
 
 if __name__ == '__main__':
     app.run(debug=True, port=8888)
